@@ -1,0 +1,11 @@
+name: qec
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  - numpy
+  - pytorch
+  - networkx
+  - quantumlib-stim
