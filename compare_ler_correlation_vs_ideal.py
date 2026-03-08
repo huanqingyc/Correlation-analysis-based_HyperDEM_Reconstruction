@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare LER by matching: correlation analysis DEM vs ideal DEM from stim-generated circuit.
 
-仅保留 run_decode_from_files（被 run_ler_comparison.py 调用）所需的函数。
+Contains only the functions required by run_decode_from_files (called from run_ler_comparison.py).
 """
 
 import os
@@ -22,14 +22,14 @@ from function import targets_to_dets
 
 
 def create_dem_from_analysis(reference_dem, hyperedge_probs):
-    """用关联分析得到的超边概率替换参考 DEM 中的概率，得到新的 DEM。
+    """Replace reference DEM probabilities with hyperedge probs from correlation analysis.
 
     Args:
-        reference_dem: 参考 DEM（结构不变）
-        hyperedge_probs: 超边 (frozenset) -> 概率
+        reference_dem: Reference DEM (structure unchanged)
+        hyperedge_probs: hyperedge (frozenset) -> probability
 
     Returns:
-        新 DEM
+        New DEM
     """
     from run_ler_comparison import extract_hyperedge_from_dem
     reference_probs, _ = extract_hyperedge_from_dem(reference_dem)
@@ -50,7 +50,7 @@ def create_dem_from_analysis(reference_dem, hyperedge_probs):
 
 
 def _decode_in_chunks(dem, dets, obvs, max_cores, chunk_decode_fn):
-    """通用分块解码：构建 chunks，并行或串行调用 chunk_decode_fn，返回 (ler, predicted_obs)。"""
+    """Generic chunked decode: build chunks, call chunk_decode_fn in parallel or serial, return (ler, predicted_obs)."""
     n_shots = dets.shape[0]
     max_cores = max_cores or mp.cpu_count()
     chunk_size = max(1, n_shots // max_cores)
@@ -80,7 +80,7 @@ def _decode_in_chunks(dem, dets, obvs, max_cores, chunk_decode_fn):
 
 
 def _decode_chunk_belief_matching(chunk_data):
-    """单块 BeliefMatching 解码，供多进程调用（须在模块顶层以便 pickle）。"""
+    """Single-chunk BeliefMatching decode, for multiprocessing (must be at module top for pickle)."""
     from beliefmatching import BeliefMatching
     i, start_idx, end_idx, dets_chunk, obvs_chunk, dem_chunk = chunk_data
     bm = BeliefMatching(dem_chunk, max_bp_iters=10)
@@ -89,12 +89,12 @@ def _decode_chunk_belief_matching(chunk_data):
 
 
 def decode_with_belief_matching(dem, dets, obvs, max_cores=None):
-    """用 BeliefMatching 对整批 dets 解码，与 obvs 比较得到 LER。"""
+    """Decode full batch of dets with BeliefMatching, compare with obvs to get LER."""
     return _decode_in_chunks(dem, dets, obvs, max_cores, _decode_chunk_belief_matching)
 
 
 def _decode_chunk_bposd(chunk_data):
-    """单块 BPOSD 解码，供多进程调用（须在模块顶层以便 pickle）。"""
+    """Single-chunk BPOSD decode, for multiprocessing (must be at module top for pickle)."""
     from stimbposd import BPOSD
     i, start_idx, end_idx, dets_chunk, obvs_chunk, dem_chunk = chunk_data
     decoder = BPOSD(dem_chunk, max_bp_iters=20)
@@ -103,12 +103,12 @@ def _decode_chunk_bposd(chunk_data):
 
 
 def decode_with_bposd(dem, dets, obvs, max_cores=None):
-    """用 BPOSD 对整批 dets 解码，与 obvs 比较得到 LER。"""
+    """Decode full batch of dets with BPOSD, compare with obvs to get LER."""
     return _decode_in_chunks(dem, dets, obvs, max_cores, _decode_chunk_bposd)
 
 
 def sample_dets_and_observables(circuit, shots, seed=None):
-    """从电路同一次采样中得到检测事件与 observable 翻转。"""
+    """Sample detection events and observable flips from the circuit in one shot."""
     sampler = circuit.compile_detector_sampler(seed=seed)
     dets, obs = sampler.sample(shots=shots, separate_observables=True)
     if obs.ndim == 2 and obs.shape[1] == 1:
@@ -125,16 +125,16 @@ def sample_until_logical_errors(
     seed=43,
     max_shots=1_000_000_000,
 ):
-    """采样并解码，直到收集到 target_logical_errors 次逻辑错误。
+    """Sample and decode until target_logical_errors logical errors are collected.
 
     Args:
-        circuit: stim 电路
-        dem: 用于停止判定的 DEM（通常为 ideal_dem）
-        decode_fn: 解码函数 (dem, dets, obvs) -> (ler, predicted_obs)
-        target_logical_errors: 目标逻辑错误次数，默认 200
-        batch_size: 每批采样量
-        seed: 随机种子
-        max_shots: 最大采样量上限
+        circuit: stim circuit
+        dem: DEM for stop criterion (usually ideal_dem)
+        decode_fn: Decode function (dem, dets, obvs) -> (ler, predicted_obs)
+        target_logical_errors: Target number of logical errors, default 200
+        batch_size: Shots per batch
+        seed: Random seed
+        max_shots: Max shots upper limit
 
     Returns:
         (dets, obvs, total_shots, total_logical_errors, decode_time_sec, num_decode_runs)

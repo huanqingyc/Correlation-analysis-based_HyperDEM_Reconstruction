@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""LER 比较实验：Ideal vs Given DEM vs Inference DEM。
+"""LER comparison experiment: Ideal vs Given DEM vs Inference DEM.
 
-独立脚本，提供两个入口：
-1. run_correlation_analysis: 关联分析，输出至 .json 和 .txt
-2. run_decode_from_files: 从文件读取关联分析结果并执行解码实验
+Standalone script with two entry points:
+1. run_correlation_analysis: Correlation analysis, output to .json and .txt
+2. run_decode_from_files: Load correlation analysis from files and run decode experiment
 """
 
 import ast
@@ -22,13 +22,13 @@ from compare_ler_correlation_vs_ideal import (
 
 
 def extract_hyperedge_from_dem(dem: stim.DetectorErrorModel) -> tuple:
-    """从 DEM 解析超边及其概率。
+    """Parse hyperedges and their probabilities from DEM.
 
     Args:
-        dem: 检测器错误模型
+        dem: Detector error model
 
     Returns:
-        (hyperedge_probs, hyperedges): 超边->概率的 dict，以及超边列表
+        (hyperedge_probs, hyperedges): hyperedge->prob dict, and hyperedge list
     """
     hyperedges = []
     hyperedge_probs = {}
@@ -48,31 +48,31 @@ def extract_hyperedge_from_dem(dem: stim.DetectorErrorModel) -> tuple:
 
 
 def _format_inference_eps(eps):
-    """将 inference_eps 格式化为可作目录名的字符串。"""
+    """Format inference_eps as a directory-safe string."""
     if isinstance(eps, (list, tuple)):
         return "_".join(str(e) for e in eps)
     return str(eps)
 
 
 def get_output_dir(code_task, distance, rounds, shots_analysis, inference_eps, base_dir="data"):
-    """获取输出目录路径：data/{code_task}_d{d}r{r}/{shots_analysis}_{inference_eps}/"""
+    """Get output directory path: data/{code_task}_d{d}r{r}/{shots_analysis}_{inference_eps}/"""
     code_task_safe = code_task.replace(":", "_")
     eps_str = _format_inference_eps(inference_eps)
     return os.path.join(base_dir, f"{code_task_safe}_d{distance}r{rounds}", f"{shots_analysis}_{eps_str}")
 
 def get_ca_base_dir(code_task, distance, rounds, base_dir="data"):
-    """获取某代码的 correlation 根目录，用于一次遍历多组数据的解码。"""
+    """Get correlation root directory for a code, for decoding multiple groups in one pass."""
     code_task_safe = code_task.replace(":", "_")
     return os.path.join(base_dir, f"{code_task_safe}_d{distance}r{rounds}")
 
 def _to_json_scalar(x):
-    """将 Tensor/numpy 标量转为 Python 原生类型。"""
+    """Convert Tensor/numpy scalar to Python native type."""
     if hasattr(x, "item"):
         return float(x.item())
     return float(x)
 
 def _ca_to_json_serializable(ca_results):
-    """将 ca_results 转为 JSON 可序列化格式（frozenset -> tuple, Tensor -> float）。"""
+    """Convert ca_results to JSON-serializable format (frozenset -> tuple, Tensor -> float)."""
     def conv_key(k):
         return tuple(sorted(k)) if isinstance(k, (frozenset, set)) else k
 
@@ -94,7 +94,7 @@ def _ca_to_json_serializable(ca_results):
     return out
 
 def _ca_from_json_serializable(data):
-    """从 JSON 格式还原为 ca_results（tuple -> frozenset）。"""
+    """Restore ca_results from JSON format (tuple -> frozenset)."""
     def to_frozenset(x):
         return frozenset(x) if isinstance(x, (list, tuple)) else x
 
@@ -119,17 +119,17 @@ def _ca_from_json_serializable(data):
     return out
 
 def _fmt_row(h_str, p_id_s, p_gv_s, gv_e, p_if_s, if_e):
-    """格式化 per-hyperedge 表格行。"""
+    """Format per-hyperedge table row."""
     return f"{h_str:<20} {p_id_s:>12} {p_gv_s:>12} {gv_e:>10} {p_if_s:>12} {if_e:>10}"
 
 def _build_decomposed_targets(dets_frozenset):
-    """将超边分解为 graphlike (≤2 detector) 组件，兼容 belief_matching 解码。
+    """Decompose hyperedge into graphlike (<=2 detector) components for belief_matching decode.
 
-    与 circuit.detector_error_model(decompose_errors=True) 的格式一致：
-    - ≤2 体：直接返回 detector targets，无需分解
-    - 3+ 体：拆成不相交的 ≤2 体组件，用 ^ (separator) 连接
-      例如 {D0,D1,D2} → D0 D1 ^ D2
-           {D0,D1,D2,D3} → D0 D1 ^ D2 D3
+    Matches circuit.detector_error_model(decompose_errors=True) format:
+    - <=2 body: return detector targets directly, no decomposition
+    - 3+ body: split into disjoint <=2 body components, joined by ^ (separator)
+      e.g. {D0,D1,D2} -> D0 D1 ^ D2
+           {D0,D1,D2,D3} -> D0 D1 ^ D2 D3
     """
     sorted_dets = sorted(dets_frozenset)
     n = len(sorted_dets)
@@ -158,18 +158,18 @@ def run_correlation_analysis(
     CA_mode=("given", "inference"),
     base_dir="data",
 ):
-    """运行关联分析，输出至 data/{code_task}_d{d}r{r}/{shots_analysis}_{inference_eps}/ 目录。
+    """Run correlation analysis, output to data/{code_task}_d{d}r{r}/{shots_analysis}_{inference_eps}/.
 
-    仅做关联分析，不存储解码相关参数（decoder 等）。解码时由 run_decode_from_files 单独指定。
+    Correlation analysis only, no decode params (decoder etc.) stored. Decode params set by run_decode_from_files.
 
-    每个 (shots_analysis, inference_eps) 组合对应一个子目录，内含 correlation.json、correlation.txt。
+    Each (shots_analysis, inference_eps) combo maps to a subdir with correlation.json, correlation.txt.
 
     Args:
-        distance, rounds, p_circuit, code_task: 电路参数
-        shots_analysis_list: 拟合样本量列表
-        max_order, inference_eps: 关联分析参数
+        distance, rounds, p_circuit, code_task: Circuit params
+        shots_analysis_list: List of fit sample sizes
+        max_order, inference_eps: Correlation analysis params
         CA_mode: ['given','inference']
-        base_dir: 输出根目录，默认 "data"
+        base_dir: Output root dir, default "data"
 
     Returns:
         tuple: (ca_results dict, ca_json_paths list, ca_txt_paths list)
@@ -178,7 +178,7 @@ def run_correlation_analysis(
         shots_analysis_list = [1000, 10000, 100000, 1000000]
 
     shots_analysis = max(shots_analysis_list)
-    use_decompose = True  # 关联分析使用 graphlike 格式
+    use_decompose = True  # Correlation analysis uses graphlike format
 
     circuit, _, _, num_dets = generate_test_circuit(
         distance=distance,
@@ -192,7 +192,7 @@ def run_correlation_analysis(
     )
     ideal_dem = circuit.detector_error_model(decompose_errors=use_decompose)
     ideal_probs, hyperedges = extract_hyperedge_from_dem(ideal_dem)
-    print(f"检测器数量: {num_dets}, 超边数量: {len(ideal_probs)}")
+    print(f"Num detectors: {num_dets}, num hyperedges: {len(ideal_probs)}")
 
     dets_analysis, _ = sample_dets_and_observables(circuit, shots_analysis, seed=42)
 
@@ -215,7 +215,7 @@ def run_correlation_analysis(
             given_probs = {k: v for d in p_given for k, v in d.items()}
             dt = time.time() - t0
             given_time_list.append(dt)
-            print(f"given_dem 关联分析: {len(given_probs)} 超边, 耗时 {dt:.6f}s")
+            print(f"given_dem correlation analysis: {len(given_probs)} hyperedges, time {dt:.6f}s")
             given_probs_list.append(given_probs)
     else:
         given_probs_list = [{} for _ in shots_analysis_list]
@@ -239,15 +239,15 @@ def run_correlation_analysis(
             infer_probs = {k: v for d in p_infer for k, v in d.items()}
             dt = time.time() - t0
             infer_time_list.append(dt)
-            print(f"inference 关联分析: {len(infer_probs)} 超边, 耗时 {dt:.6f}s")
+            print(f"inference correlation analysis: {len(infer_probs)} hyperedges, time {dt:.6f}s")
             infer_probs_list.append(infer_probs)
         for i in range(len(shots_analysis_list)):
             infer_set = set(infer_probs_list[i].keys())
             extra_edges.append(infer_set - ideal_set)
             has_extra.append(len(extra_edges[i]) > 0)
             print(
-                f"\nIdeal 超边: {len(ideal_set)}, Inference 超边: {len(infer_set)}, "
-                f"Inference 多余边: {len(extra_edges[i])}"
+                f"\nIdeal hyperedges: {len(ideal_set)}, Inference hyperedges: {len(infer_set)}, "
+                f"Inference extra edges: {len(extra_edges[i])}"
             )
     else:
         infer_probs_list = [{} for _ in shots_analysis_list]
@@ -258,7 +258,7 @@ def run_correlation_analysis(
     all_rows = []
     for i in range(len(shots_analysis_list)):
         print(f"Correlation analysis with {shots_analysis_list[i]} shots")
-        header = _fmt_row("超边", "ideal p", "given", "given err%", "infer p", "infer err%")
+        header = _fmt_row("Hyperedge", "ideal p", "given", "given err%", "infer p", "infer err%")
         sep = "-" * 90
         print("\n" + "=" * 90)
         print(header)
@@ -285,7 +285,7 @@ def run_correlation_analysis(
             all_rows[i].append(("ideal", h, row))
         if "inference" in CA_mode and has_extra[i]:
             print(sep)
-            print(f">>> Inference 额外发现的超边 ({len(extra_edges[i])} 条，ideal/given 中不存在):")
+            print(f">>> Inference extra hyperedges ({len(extra_edges[i])}, not in ideal/given):")
             print(sep)
             for h in sorted(extra_edges[i], key=lambda x: (len(x), sorted(x))):
                 p_if = infer_probs_list[i][h]
@@ -341,7 +341,7 @@ def run_correlation_analysis(
 
         with open(ca_json_path, "w", encoding="utf-8") as f:
             json.dump(_ca_to_json_serializable(ca_results_i), f, indent=2, ensure_ascii=False)
-        print(f"关联分析结果已保存: {ca_json_path}")
+        print(f"Correlation analysis saved: {ca_json_path}")
 
         run_time = given_time_list[i] + infer_time_list[i]
         with open(ca_txt_path, "w", encoding="utf-8") as f:
@@ -350,8 +350,8 @@ def run_correlation_analysis(
             f.write("=" * 90 + "\n\n")
             f.write(f"Code task: {code_task}, d={distance}, r={rounds}, p={p_circuit}\n")
             f.write(f"shots_analysis={sa}, max_order={max_order}\n")
-            f.write(f"运行时间: {run_time:.2f}s\n")
-            f.write(f"Ideal 超边: {len(ideal_set)}\n\n")
+            f.write(f"Run time: {run_time:.2f}s\n")
+            f.write(f"Ideal hyperedges: {len(ideal_set)}\n\n")
             f.write(f"correlation analysis with {sa} shots\n")
             f.write("\n" + "=" * 90 + "\n")
             f.write("Per-hyperedge probabilities:\n")
@@ -360,7 +360,7 @@ def run_correlation_analysis(
             f.write("-" * 90 + "\n")
             for _tag, _h, row in all_rows[i]:
                 f.write(row + "\n")
-        print(f"关联分析表格已保存: {ca_txt_path}")
+        print(f"Correlation table saved: {ca_txt_path}")
 
         ca_json_paths.append(ca_json_path)
         ca_txt_paths.append(ca_txt_path)
@@ -372,21 +372,21 @@ def collect_ca_from_base_dir(
     shots_analysis_list=None,
     inference_eps=None,
 ) -> dict:
-    """从 base_dir 下收集子目录中的 correlation.json，合并为多组 ca_results。
+    """Collect correlation.json from subdirs under base_dir, merge into multi-group ca_results.
 
-    用于一次遍历多组数据的解码。目录结构：ca_base_dir/{shots}_{eps}/correlation.json
+    For decoding multiple groups in one pass. Dir structure: ca_base_dir/{shots}_{eps}/correlation.json
 
     Args:
-        ca_base_dir: 如 data/surface_code_rotated_memory_x_d5r5/
-        shots_analysis_list: 可选，只收集指定的 shots 组，如 [150000, 1500000, 15000000]
-        inference_eps: 可选，只收集匹配的 inference_eps 组
+        ca_base_dir: e.g. data/surface_code_rotated_memory_x_d5r5/
+        shots_analysis_list: Optional, only collect specified shots groups, e.g. [150000, 1500000, 15000000]
+        inference_eps: Optional, only collect matching inference_eps groups
 
     Returns:
-        合并后的 ca_results，shots_analysis_list 包含所有组
+        Merged ca_results, shots_analysis_list contains all groups
     """
     ca_base_dir = os.path.normpath(ca_base_dir)
     if not os.path.isdir(ca_base_dir):
-        raise FileNotFoundError(f"目录不存在: {ca_base_dir}")
+        raise FileNotFoundError(f"Directory does not exist: {ca_base_dir}")
 
     shots_set = set(shots_analysis_list) if shots_analysis_list is not None else None
     eps_str = _format_inference_eps(inference_eps) if inference_eps is not None else None
@@ -414,8 +414,8 @@ def collect_ca_from_base_dir(
     if not entries:
         filter_msg = ""
         if shots_set is not None or eps_str is not None:
-            filter_msg = f"（过滤 shots={shots_analysis_list}, inference_eps={inference_eps}）"
-        raise FileNotFoundError(f"目录 {ca_base_dir} 下未找到匹配的 correlation.json {filter_msg}")
+            filter_msg = f"(filter shots={shots_analysis_list}, inference_eps={inference_eps})"
+        raise FileNotFoundError(f"No matching correlation.json under {ca_base_dir} {filter_msg}")
 
     def _sort_key(item):
         subname = item[0]
@@ -448,10 +448,10 @@ def collect_ca_from_base_dir(
     return merged
 
 def load_correlation_analysis(ca_path: str) -> dict:
-    """从 .json 文件加载关联分析结果。
+    """Load correlation analysis from .json file.
 
-    - 文件路径：data/{code}_d{d}r{r}/{shots}_{eps}/correlation.json
-    - 目录路径：data/{code}_d{d}r{r}/{shots}_{eps}/ 时自动查找 correlation.json
+    - File path: data/{code}_d{d}r{r}/{shots}_{eps}/correlation.json
+    - Dir path: data/{code}_d{d}r{r}/{shots}_{eps}/ auto-finds correlation.json
     """
     ca_path = str(ca_path)
     if os.path.isdir(ca_path):
@@ -459,7 +459,7 @@ def load_correlation_analysis(ca_path: str) -> dict:
         if os.path.isfile(json_path):
             ca_path = json_path
         else:
-            raise FileNotFoundError(f"目录 {ca_path} 中未找到 correlation.json")
+            raise FileNotFoundError(f"correlation.json not found in directory {ca_path}")
     with open(ca_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return _ca_from_json_serializable(data)
@@ -474,23 +474,23 @@ def run_decode_from_files(
     inference_eps=None,
     base_dir="data",
 ):
-    """从文件读取关联分析结果并执行解码实验。
+    """Load correlation analysis from files and run decode experiment.
 
     Args:
-        ca_path: 关联分析结果路径，支持：
-            - 单文件：correlation.json 路径
-            - 单目录：含 correlation.json 的目录
-            - 多组目录：如 data/surface_code_rotated_memory_x_d5r5/，遍历子目录收集
-        target_logical_errors: 目标逻辑错误次数，默认 200
-        batch_size: 每批采样量
-        max_shots: 最大采样量上限
-        decoder: 解码器，'belief_matching' 或 'bposd'
-        shots_analysis_list: 多组目录时，只解码指定的 shots 组
-        inference_eps: 多组目录时，只解码匹配的 inference_eps 组
-        base_dir: 输出根目录，默认 "data"
+        ca_path: Correlation analysis path, supports:
+            - Single file: correlation.json path
+            - Single dir: dir containing correlation.json
+            - Multi-group dir: e.g. data/surface_code_rotated_memory_x_d5r5/, collect from subdirs
+        target_logical_errors: Target logical errors, default 200
+        batch_size: Shots per batch
+        max_shots: Max shots upper limit
+        decoder: Decoder, 'belief_matching' or 'bposd'
+        shots_analysis_list: For multi-group dir, only decode specified shots groups
+        inference_eps: For multi-group dir, only decode matching inference_eps groups
+        base_dir: Output root dir, default "data"
 
     Returns:
-        list[str]: 各 shots_analysis 对应的 ler.txt 路径列表
+        list[str]: ler.txt paths for each shots_analysis
     """
     path = str(ca_path)
     if os.path.isdir(path):
@@ -526,32 +526,32 @@ def run_decode(
     output_dir=None,
     base_dir="data",
 ):
-    """基于关联分析结果进行解码，比较 LER。
+    """Decode based on correlation analysis results, compare LER.
 
-    采样并解码直到收集到 target_logical_errors 次逻辑错误（以 ideal_dem 为判定），
-    再用同一批样本评估各 DEM 的 LER。
+    Sample and decode until target_logical_errors logical errors (ideal_dem as criterion),
+    then evaluate each DEM's LER on the same batch.
 
-    可从内存传入 ca_results，或从 ca_path 读取。
+    Pass ca_results from memory or load from ca_path.
 
     Args:
-        ca_results: 关联分析结果 dict（由 run_correlation_analysis 返回）
-        ca_path: 或从 .json 文件路径读取
-        target_logical_errors: 目标逻辑错误次数，默认 200
-        batch_size: 每批采样量
-        max_shots: 最大采样量上限，防止极端低 LER 时无限循环
-        decoder: 若与 ca_results 中不一致可覆盖
-        output_dir: 已弃用，保留兼容；实际使用 base_dir
-        base_dir: 输出根目录，默认 "data"，LER 写入 data/{code_task}_d{d}r{r}/{shots_analysis}_{inference_eps}/ler.txt
+        ca_results: Correlation analysis dict (from run_correlation_analysis)
+        ca_path: Or load from .json file path
+        target_logical_errors: Target logical errors, default 200
+        batch_size: Shots per batch
+        max_shots: Max shots limit, prevent infinite loop for very low LER
+        decoder: Override if inconsistent with ca_results
+        output_dir: Deprecated, kept for compatibility; use base_dir
+        base_dir: Output root dir, default "data", LER written to data/{code_task}_d{d}r{r}/{shots_analysis}_{inference_eps}/ler.txt
 
     Returns:
-        list[str]: 各 shots_analysis 对应的 ler.txt 路径列表
+        list[str]: ler.txt paths for each shots_analysis
     """
     if ca_results is None and ca_path is None:
-        raise ValueError("必须提供 ca_results 或 ca_path")
+        raise ValueError("Must provide ca_results or ca_path")
     if ca_results is None:
         ca_results = load_correlation_analysis(ca_path)
 
-    # 支持从 ca_base_dir 合并的多组数据（含 inference_eps_list）
+    # Support merged multi-group data from ca_base_dir (incl. inference_eps_list)
     if "inference_eps_list" in ca_results["params"]:
         inference_eps_list = ca_results["params"]["inference_eps_list"]
     else:
@@ -578,7 +578,7 @@ def run_decode(
     has_extra = ca_results["has_extra"]
 
     if dec not in ("belief_matching", "bposd"):
-        raise ValueError(f"decoder 必须是 'belief_matching' 或 'bposd'，当前为 {dec!r}")
+        raise ValueError(f"decoder must be 'belief_matching' or 'bposd', got {dec!r}")
     decode_fn = decode_with_belief_matching if dec == "belief_matching" else decode_with_bposd
 
     circuit, _, _, num_dets = generate_test_circuit(
@@ -594,7 +594,7 @@ def run_decode(
     use_decompose = dec == "belief_matching"
     ideal_dem = circuit.detector_error_model(decompose_errors=use_decompose)
 
-    print(f"\n使用解码器: {dec}，采样直到收集 {target_logical_errors} 次逻辑错误...")
+    print(f"\nUsing decoder: {dec}, sampling until {target_logical_errors} logical errors collected...")
     dets_decode, obs_decode, total_shots, total_logical_errors, _, _ = sample_until_logical_errors(
         circuit, ideal_dem, decode_fn,
         target_logical_errors=target_logical_errors,
@@ -603,9 +603,9 @@ def run_decode(
         max_shots=max_shots,
     )
     ler_ideal = total_logical_errors / total_shots
-    print(f"  实际采样: {total_shots} shots, 逻辑错误: {total_logical_errors}")
+    print(f"  Actual sampled: {total_shots} shots, logical errors: {total_logical_errors}")
     print("\n" + "=" * 70)
-    print("LER 比较 (held-out decode sample)")
+    print("LER comparison (held-out decode sample)")
     print("=" * 70)
     print(f"  Ideal DEM LER:                {ler_ideal:.6f}")
 
@@ -624,7 +624,7 @@ def run_decode(
             f.write("=" * 90 + "\n\n")
             f.write(f"Code task: {code_task}, d={distance}, r={rounds}, p={p_circuit}\n")
             f.write(f"shots_analysis={sa}, target_logical_errors={target_logical_errors}, total_shots={total_shots}, max_order={params['max_order']}, decoder={dec}\n")
-            f.write(f"Ideal 超边: {len(ideal_set)}\n")
+            f.write(f"Ideal hyperedges: {len(ideal_set)}\n")
             f.write(f"Ideal DEM LER:                {ler_ideal:.6f}\n")
         if "given" in CA_mode:
             given_dem = create_dem_from_analysis(ideal_dem, given_probs_list[i])
@@ -642,7 +642,7 @@ def run_decode(
         if "given" in CA_mode:
             print(f"  Given DEM LER from {shots_analysis_list[i]} shots:                {ler_given:.6f}  (gap: {ler_ideal - ler_given:+.6f})")
         if "inference" in CA_mode:
-            print(f"  Inference DEM LER (共有边) from {shots_analysis_list[i]} shots:   {ler_infer_shared:.6f}  (gap: {ler_ideal - ler_infer_shared:+.6f})")
+            print(f"  Inference DEM LER (shared edges) from {shots_analysis_list[i]} shots:   {ler_infer_shared:.6f}  (gap: {ler_ideal - ler_infer_shared:+.6f})")
 
         if "inference" in CA_mode and has_extra[i]:
             extra_dem = stim.DetectorErrorModel()
@@ -660,33 +660,33 @@ def run_decode(
                 extra_dem.append(stim.DemInstruction("error", args=[p_val], targets=targets))
             infer_dem_full = create_dem_from_analysis(extra_dem, infer_probs_list[i])
             ler_infer_full, _ = decode_fn(infer_dem_full, dets_decode, obs_decode)
-            print(f"  Inference DEM LER (含额外边)from {shots_analysis_list[i]} shots: {ler_infer_full:.6f}  (gap: {ler_ideal - ler_infer_full:+.6f})")
+            print(f"  Inference DEM LER (with extra edges) from {shots_analysis_list[i]} shots: {ler_infer_full:.6f}  (gap: {ler_ideal - ler_infer_full:+.6f})")
         else:
             ler_infer_full = ler_infer_shared if "inference" in CA_mode else None
             if "inference" in CA_mode:
-                print("  (Inference 超边与 ideal 一致，无额外边)")
+                print("  (Inference hyperedges match ideal, no extra edges)")
 
         with open(txt_path, "a", encoding="utf-8") as f:
             f.write(f"\ncorrelation analysis with {shots_analysis_list[i]} shots\n")
             f.write(f"Given DEM LER:                {ler_given:.6f}  (gap: {ler_ideal - ler_given:+.6f})\n" if ler_given is not None else "Given DEM LER:                -      \n")
             if "inference" in CA_mode:
-                f.write(f"Inference 超边: {len(infer_set)}, 额外边: {len(extra_edges[i])}\n")
-                f.write(f"Inference DEM LER (共有边):   {ler_infer_shared:.6f}  (gap: {ler_ideal - ler_infer_shared:+.6f})\n")
+                f.write(f"Inference hyperedges: {len(infer_set)}, extra edges: {len(extra_edges[i])}\n")
+                f.write(f"Inference DEM LER (shared edges):   {ler_infer_shared:.6f}  (gap: {ler_ideal - ler_infer_shared:+.6f})\n")
                 if has_extra[i]:
-                    f.write(f"Inference DEM LER (含额外边): {ler_infer_full:.6f}  (gap: {ler_ideal - ler_infer_full:+.6f})\n")
+                    f.write(f"Inference DEM LER (with extra edges): {ler_infer_full:.6f}  (gap: {ler_ideal - ler_infer_full:+.6f})\n")
                 else:
-                    f.write("(Inference 超边与 ideal 一致，无额外边)\n")
+                    f.write("(Inference hyperedges match ideal, no extra edges)\n")
             else:
-                f.write("Inference 超边: -, 额外边: -      \n")
+                f.write("Inference hyperedges: -, extra edges: -      \n")
 
     return ler_paths
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="LER 比较：关联分析 或 从文件解码")
+    parser = argparse.ArgumentParser(description="LER comparison: correlation analysis or decode from files")
     parser.add_argument("--ca-path", type=str, default=None,
-                        help="若提供，则执行 run_decode_from_files；否则执行 run_correlation_analysis")
+                        help="If provided, run run_decode_from_files; else run run_correlation_analysis")
     parser.add_argument("--decoder", choices=["belief_matching", "bposd"], default="belief_matching")
     parser.add_argument("--distance", type=int, default=5)
     parser.add_argument("--rounds", type=int, default=5)
@@ -707,7 +707,7 @@ if __name__ == "__main__":
             decoder=args.decoder,
             base_dir=args.base_dir,
         )
-        print(f"\nLER 输出:")
+        print(f"\nLER output:")
         for p in ler_paths:
             print(f"  {p}")
     else:
@@ -722,6 +722,6 @@ if __name__ == "__main__":
             device="cpu",
             base_dir=args.base_dir,
         )
-        print(f"\n关联分析结果:")
+        print(f"\nCorrelation analysis output:")
         for p in ca_json_paths:
             print(f"  {p}")

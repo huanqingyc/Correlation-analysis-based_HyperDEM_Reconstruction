@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""多体关联分析核心函数模块"""
+"""Core functions for multi-body correlation analysis."""
 
 import itertools
 import math
@@ -14,7 +14,7 @@ HyperEdge = FrozenSet[int]
 
 
 def targets_to_dets(targets):
-    """将 stim 指令的 targets 解析为 detector ID 的 frozenset。"""
+    """Parse stim instruction targets into a frozenset of detector IDs."""
     dets_track = []
     dets_sep_track = []
     for t in targets:
@@ -28,9 +28,9 @@ def targets_to_dets(targets):
 
 
 def pair_correlations_inference(detection_events, device, eps=1e-4):
-    """计算 pair correlations，返回 p_ij 矩阵和 2 阶超边集合。"""
+    """Compute pair correlations, return p_ij matrix and 2nd-order hyperedge set."""
     num_shots, num_dets = detection_events.shape
-    sigma_events = 1 - 2 * detection_events  # 转换为 (1, -1) 格式
+    sigma_events = 1 - 2 * detection_events  # Convert to (1, -1) format
     sigma_tensor = torch.from_numpy(sigma_events.astype(np.float32)).to(device)
     sum_vec = sigma_tensor.sum(dim=0)
     corr = sigma_tensor.T @ sigma_tensor
@@ -46,8 +46,8 @@ def pair_correlations_inference(detection_events, device, eps=1e-4):
 
 def search_potential_hyperedges(p_ij, max_order):
     """
-    搜索潜在超边：将 p_ij 当作邻接矩阵，找小于等于 max_order 的全连接子图，
-    每个 clique 内所有 k 阶子集 (3≤k≤max_order) 加入对应 hyperedges[k-1]。
+    Search for potential hyperedges: treat p_ij as adjacency matrix, find cliques
+    of size <= max_order, add all k-order subsets (3<=k<=max_order) to hyperedges[k-1].
     """
     adj = p_ij.detach().cpu().numpy()
     G = nx.from_numpy_array(adj)
@@ -113,21 +113,21 @@ def cal_multi_body_correlations(
     correct_in_step: bool = True,
 ) -> Tuple[list, list]:
     """
-    计算多体关联，两种工作模式通过 mode 控制。
+    Compute multi-body correlations. Two modes controlled by mode.
 
     Args:
-        detection_events: 检测事件数组，形状 (shots, num_detectors)
-        mode: 'inference' 或 'given_dem'
-            - inference: 无 DEM 先验，从数据推断超边结构并剪枝
-            - given_dem: 使用给定的超边结构，不剪枝
-        hyperedge_list: 各阶超边列表，仅 given_dem 模式必需
-        max_order: 最大阶数，仅 inference 模式有效，默认 4
-        device: 计算设备，'cpu' 或 'cuda:X'
-        eps: (eps_1d, eps_2d+) 剪枝阈值，仅 inference 模式有效
-        correct_in_step: 是否在每步对 w>1 进行修正，仅 given_dem 模式有效
+        detection_events: Detection event array, shape (shots, num_detectors)
+        mode: 'inference' or 'given_dem'
+            - inference: No DEM prior, infer hyperedge structure from data and prune
+            - given_dem: Use given hyperedge structure, no pruning
+        hyperedge_list: Per-order hyperedge list, required only in given_dem mode
+        max_order: Max order, effective only in inference mode, default 4
+        device: Compute device, 'cpu' or 'cuda:X'
+        eps: (eps_1d, eps_2d+) Pruning thresholds, effective only in inference mode
+        correct_in_step: Whether to correct w>1 at each step, given_dem mode only
 
     Returns:
-        (p_list, hyperedge_list): 各阶关联与超边列表
+        (p_list, hyperedge_list): Per-order correlations and hyperedge list
     """
     if mode == "inference":
         _, num_dets = detection_events.shape
@@ -141,7 +141,7 @@ def cal_multi_body_correlations(
             hyperedge_list.extend(high_order[2:max_order])
     else:
         if hyperedge_list is None:
-            raise ValueError("given_dem 模式必须提供 hyperedge_list")
+            raise ValueError("given_dem mode requires hyperedge_list")
 
     f_list = cal_m_f_given_dem(detection_events, hyperedge_list, device)
     p_list, hyperedge_list = cal_p(
@@ -159,7 +159,7 @@ def cal_m_f_given_dem(detection_events: np.ndarray, hyperedges: list, device: st
     max_order = len(hyperedges)
     m_list = [{} for _ in range(max_order)]
 
-    # 按子集大小批量计算 m，减少 Python 循环与 GPU 调用次数
+    # Batch compute m by subset size to reduce Python loops and GPU calls
     for s in range(1, max_order + 1):
         needed = set()
         for order in range(s, max_order + 1):
@@ -203,25 +203,25 @@ def generate_test_circuit(distance=4, rounds=2, shots=500000,
                          before_measure_flip_probability=0.001,
                          after_reset_flip_probability=0.001):
     """
-    生成测试电路和检测事件
-    
-    参数:
-        distance: 代码距离
-        rounds: 轮数
-        shots: 采样次数
-        code_task: 代码类型，例如：
+    Generate test circuit and detection events.
+
+    Args:
+        distance: Code distance
+        rounds: Number of rounds
+        shots: Number of samples
+        code_task: Code type, e.g.:
             - 'surface_code:rotated_memory_x'
             - 'surface_code:rotated_memory_z'
             - 'repetition_code:memory'
             - 'color_code:memory'
-            默认为 'surface_code:rotated_memory_x'
-        其他参数: 噪声参数
-    
-    返回:
-        circuit: stim电路对象
-        dem: 检测器错误模型
-        dets: 检测事件数组
-        num_dets: 检测器数量
+            Default: 'surface_code:rotated_memory_x'
+        Other args: Noise parameters
+
+    Returns:
+        circuit: stim circuit object
+        dem: Detector error model
+        dets: Detection event array
+        num_dets: Number of detectors
     """
     circuit = stim.Circuit.generated(
         code_task=code_task,
@@ -233,7 +233,7 @@ def generate_test_circuit(distance=4, rounds=2, shots=500000,
         after_reset_flip_probability=after_reset_flip_probability,
     )
     
-    # decompose_errors=True 将超边错误分解为至多 2 个 detector 的边，BeliefMatching 等解码器要求此形式
+    # decompose_errors=True decomposes hyperedge errors into at most 2-detector edges, required by BeliefMatching etc.
     dem = circuit.detector_error_model()
     num_dets = dem.num_detectors
     dets = circuit.compile_detector_sampler().sample(shots=shots)
