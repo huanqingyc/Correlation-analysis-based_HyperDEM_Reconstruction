@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Core functions for multi-body correlation analysis."""
+"""Inference and correlation-analysis core functions."""
 
 import itertools
 import math
@@ -7,24 +7,9 @@ from typing import FrozenSet, Tuple
 
 import numpy as np
 import torch
-import stim
 import networkx as nx
 
 HyperEdge = FrozenSet[int]
-
-
-def targets_to_dets(targets):
-    """Parse stim instruction targets into a frozenset of detector IDs."""
-    dets_track = []
-    dets_sep_track = []
-    for t in targets:
-        if t.is_relative_detector_id():
-            dets_sep_track.append(t.val)
-        elif t.is_separator():
-            dets_track.append(dets_sep_track)
-            dets_sep_track = []
-    dets_track.append(dets_sep_track)
-    return frozenset(i for d in dets_track for i in d)
 
 
 def pair_correlations_inference(detection_events, device, eps=1e-4):
@@ -34,7 +19,8 @@ def pair_correlations_inference(detection_events, device, eps=1e-4):
     sigma_tensor = torch.from_numpy(sigma_events.astype(np.float32)).to(device)
     sum_vec = sigma_tensor.sum(dim=0)
     corr = sigma_tensor.T @ sigma_tensor
-    f_ij = (torch.outer(sum_vec, sum_vec) / corr).to(torch.float32) / num_shots
+    numerator = torch.outer(sum_vec, sum_vec)
+    f_ij = torch.where(corr != 0, numerator / corr, torch.zeros_like(corr)).to(torch.float32) / num_shots
     p_ij = (1 - torch.pow(f_ij.cpu(), 0.5)) * 0.5
     p_ij[p_ij < eps] = 0
 
@@ -62,7 +48,8 @@ def search_potential_hyperedges(p_ij, max_order):
 
     return hyperedges
 
-def cal_p( f_list: list, hyperedge_list: list, mode: str = "given_dem", eps: Tuple[float, float] = (1e-4, 1e-5), correct_in_step: bool = True,
+
+def cal_p( f_list: list, hyperedge_list: list, mode: str = "given_dem_topology", eps: Tuple[float, float] = (1e-4, 1e-5), correct_in_step: bool = True,
 ) -> Tuple[list, list]:
     max_order = min(len(f_list), len(hyperedge_list))
     w_dicts = [{} for _ in range(max_order)]
@@ -82,7 +69,7 @@ def cal_p( f_list: list, hyperedge_list: list, mode: str = "given_dem", eps: Tup
             w_dicts[k][h] = (f_list[k][h] ** exp) / prod_w
             p_dicts[k][h] = (1 - w_dicts[k][h]) * 0.5
 
-            if mode == "given_dem":
+            if mode == "given_dem_topology":
                 if correct_in_step and w_dicts[k][h] > 1:
                     w_dicts[k][h] = 1.0
                     p_dicts[k][h] = 0
@@ -93,7 +80,7 @@ def cal_p( f_list: list, hyperedge_list: list, mode: str = "given_dem", eps: Tup
         if mode == "pruning":
             hyperedge_list[k] = list(p_dicts[k].keys())
 
-    if mode == "given_dem" and not correct_in_step:
+    if mode == "given_dem_topology" and not correct_in_step:
         for k in range(max_order):
             for h in list(p_dicts[k].keys()):
                 if p_dicts[k][h] < 0:
@@ -104,28 +91,29 @@ def cal_p( f_list: list, hyperedge_list: list, mode: str = "given_dem", eps: Tup
 
 def cal_multi_body_correlations(
     detection_events,
-    mode: str = "given_dem",
+    mode: str = "given_dem_topology",
     *,
     hyperedge_list=None,
     max_order: int = 4,
     device: str = "cpu",
     eps: Tuple[float, float] = (1e-4, 1e-5),
     correct_in_step: bool = True,
+    batch_shots: int = 100000,
 ) -> Tuple[list, list]:
     """
     Compute multi-body correlations. Two modes controlled by mode.
 
     Args:
         detection_events: Detection event array, shape (shots, num_detectors)
-        mode: 'inference' or 'given_dem'
+        mode: 'inference' or 'given_dem_topology'
             - inference: No DEM prior, infer hyperedge structure from data and prune
-            - given_dem: Use given hyperedge structure, no pruning
-        hyperedge_list: Per-order hyperedge list, required only in given_dem mode
+            - given_dem_topology: Use given hyperedge structure, no pruning
+        hyperedge_list: Per-order hyperedge list, required only in given_dem_topology mode
         max_order: Max order, effective only in inference mode, default 4
         device: Compute device, 'cpu' or 'cuda:X'
         eps: (eps_1d, eps_2d+) Pruning thresholds, effective only in inference mode
         correct_in_step: Whether to correct w>1 at each step, given_dem mode only
-
+        batch_shots: Shots per batch for correlation analysis
     Returns:
         (p_list, hyperedge_list): Per-order correlations and hyperedge list
     """
@@ -141,25 +129,31 @@ def cal_multi_body_correlations(
             hyperedge_list.extend(high_order[2:max_order])
     else:
         if hyperedge_list is None:
-            raise ValueError("given_dem mode requires hyperedge_list")
+            raise ValueError("given_dem_topology mode requires hyperedge_list")
 
-    f_list = cal_m_f_given_dem(detection_events, hyperedge_list, device)
+    f_list = cal_m_f_given_dem(detection_events, hyperedge_list, device, batch_shots=batch_shots)
     p_list, hyperedge_list = cal_p(
         f_list, hyperedge_list,
-        mode="pruning" if mode == "inference" else "given_dem",
+        mode="pruning" if mode == "inference" else "given_dem_topology",
         eps=eps,
         correct_in_step=correct_in_step,
     )
     return p_list, hyperedge_list
 
 
-def cal_m_f_given_dem(detection_events: np.ndarray, hyperedges: list, device: str = "cuda:0") -> list:
+def cal_m_f_given_dem(
+    detection_events: np.ndarray,
+    hyperedges: list,
+    device: str = "cuda:0",
+    batch_shots: int = 100000,
+) -> list:
+    """Compute m and f given DEM. Uses chunking to avoid GPU OOM on large shots/subsets."""
     num_shots, _ = detection_events.shape
     sigma_tensor = torch.from_numpy((1 - 2 * detection_events).astype(np.float32)).to(device)
+    use_cuda = sigma_tensor.is_cuda
     max_order = len(hyperedges)
     m_list = [{} for _ in range(max_order)]
 
-    # Batch compute m by subset size to reduce Python loops and GPU calls
     for s in range(1, max_order + 1):
         needed = set()
         for order in range(s, max_order + 1):
@@ -174,10 +168,18 @@ def cal_m_f_given_dem(detection_events: np.ndarray, hyperedges: list, device: st
             device=sigma_tensor.device,
             dtype=torch.long,
         )
-        prods = sigma_tensor[:, indices].prod(dim=2)
-        m_vals = prods.sum(dim=0) / num_shots
+        m_vals = torch.zeros(len(subsets), device=sigma_tensor.device, dtype=sigma_tensor.dtype)
+        for shot_start in range(0, num_shots, batch_shots):
+            shot_end = min(shot_start + batch_shots, num_shots)
+            prods = sigma_tensor[shot_start:shot_end, indices].prod(dim=2)
+            m_vals = m_vals + prods.sum(dim=0)
+            del prods
+        m_vals = m_vals / num_shots
         for h_sub, val in zip(subsets, m_vals.cpu().tolist()):
             m_list[s - 1][h_sub] = val
+        del m_vals, indices, subsets, needed
+        if use_cuda:
+            torch.cuda.empty_cache()
 
     f_list = [m_list[0].copy()]
     for order in range(2, max_order + 1):
@@ -193,49 +195,7 @@ def cal_m_f_given_dem(detection_events: np.ndarray, hyperedges: list, device: st
             current_f[h] = num / (den or 1e-12)
         f_list.append(current_f)
 
+    del sigma_tensor
+    if use_cuda:
+        torch.cuda.empty_cache()
     return f_list
-
-
-def generate_test_circuit(distance=4, rounds=2, shots=500000, 
-                         code_task='surface_code:rotated_memory_x',
-                         after_clifford_depolarization=0.001,
-                         before_round_data_depolarization=0.001,
-                         before_measure_flip_probability=0.001,
-                         after_reset_flip_probability=0.001):
-    """
-    Generate test circuit and detection events.
-
-    Args:
-        distance: Code distance
-        rounds: Number of rounds
-        shots: Number of samples
-        code_task: Code type, e.g.:
-            - 'surface_code:rotated_memory_x'
-            - 'surface_code:rotated_memory_z'
-            - 'repetition_code:memory'
-            - 'color_code:memory'
-            Default: 'surface_code:rotated_memory_x'
-        Other args: Noise parameters
-
-    Returns:
-        circuit: stim circuit object
-        dem: Detector error model
-        dets: Detection event array
-        num_dets: Number of detectors
-    """
-    circuit = stim.Circuit.generated(
-        code_task=code_task,
-        distance=distance,
-        rounds=rounds,
-        after_clifford_depolarization=after_clifford_depolarization,
-        before_round_data_depolarization=before_round_data_depolarization,
-        before_measure_flip_probability=before_measure_flip_probability,
-        after_reset_flip_probability=after_reset_flip_probability,
-    )
-    
-    # decompose_errors=True decomposes hyperedge errors into at most 2-detector edges, required by BeliefMatching etc.
-    dem = circuit.detector_error_model()
-    num_dets = dem.num_detectors
-    dets = circuit.compile_detector_sampler().sample(shots=shots)
-    
-    return circuit, dem, dets, num_dets

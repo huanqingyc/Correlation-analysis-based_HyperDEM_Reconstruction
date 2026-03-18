@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Compare LER by matching: correlation analysis DEM vs ideal DEM from stim-generated circuit.
-
-Contains only the functions required by run_decode_from_files (called from run_ler_comparison.py).
-"""
+"""Decoding and sampling helpers for LER comparison."""
 
 import os
 import sys
@@ -18,7 +15,14 @@ if project_root not in sys.path:
 
 import multiprocessing as mp
 
-from function import targets_to_dets
+from utils import targets_to_dets
+
+
+def _flatten_single_observable(obs):
+    """Flatten (N,1) observable array to (N,), keep other shapes unchanged."""
+    if obs.ndim == 2 and obs.shape[1] == 1:
+        return obs.flatten()
+    return obs
 
 
 def create_dem_from_analysis(reference_dem, hyperedge_probs):
@@ -31,7 +35,7 @@ def create_dem_from_analysis(reference_dem, hyperedge_probs):
     Returns:
         New DEM
     """
-    from run_ler_comparison import extract_hyperedge_from_dem
+    from utils import extract_hyperedge_from_dem
     reference_probs, _ = extract_hyperedge_from_dem(reference_dem)
 
     new_dem = stim.DetectorErrorModel()
@@ -52,6 +56,8 @@ def create_dem_from_analysis(reference_dem, hyperedge_probs):
 def _decode_in_chunks(dem, dets, obvs, max_cores, chunk_decode_fn):
     """Generic chunked decode: build chunks, call chunk_decode_fn in parallel or serial, return (ler, predicted_obs)."""
     n_shots = dets.shape[0]
+    if n_shots == 0:
+        return 0.0, np.array([], dtype=bool)
     max_cores = max_cores or mp.cpu_count()
     chunk_size = max(1, n_shots // max_cores)
     n_chunks = (n_shots + chunk_size - 1) // chunk_size
@@ -82,7 +88,7 @@ def _decode_in_chunks(dem, dets, obvs, max_cores, chunk_decode_fn):
 def _decode_chunk_belief_matching(chunk_data):
     """Single-chunk BeliefMatching decode, for multiprocessing (must be at module top for pickle)."""
     from beliefmatching import BeliefMatching
-    i, start_idx, end_idx, dets_chunk, obvs_chunk, dem_chunk = chunk_data
+    i, start_idx, end_idx, dets_chunk, _obvs_chunk, dem_chunk = chunk_data
     bm = BeliefMatching(dem_chunk, max_bp_iters=10)
     pred = bm.decode_batch(dets_chunk)
     return i, start_idx, end_idx, pred.reshape(-1, 1) if pred.ndim == 1 else pred
@@ -96,7 +102,7 @@ def decode_with_belief_matching(dem, dets, obvs, max_cores=None):
 def _decode_chunk_bposd(chunk_data):
     """Single-chunk BPOSD decode, for multiprocessing (must be at module top for pickle)."""
     from stimbposd import BPOSD
-    i, start_idx, end_idx, dets_chunk, obvs_chunk, dem_chunk = chunk_data
+    i, start_idx, end_idx, dets_chunk, _obvs_chunk, dem_chunk = chunk_data
     decoder = BPOSD(dem_chunk, max_bp_iters=20)
     pred = decoder.decode_batch(dets_chunk)
     return i, start_idx, end_idx, pred.reshape(-1, 1) if pred.ndim == 1 else pred
@@ -111,9 +117,7 @@ def sample_dets_and_observables(circuit, shots, seed=None):
     """Sample detection events and observable flips from the circuit in one shot."""
     sampler = circuit.compile_detector_sampler(seed=seed)
     dets, obs = sampler.sample(shots=shots, separate_observables=True)
-    if obs.ndim == 2 and obs.shape[1] == 1:
-        obs = obs.flatten()
-    return dets, obs
+    return dets, _flatten_single_observable(obs)
 
 
 def sample_until_logical_errors(
@@ -149,8 +153,7 @@ def sample_until_logical_errors(
 
     while total_logical_errors < target_logical_errors and total_shots < max_shots:
         dets_batch, obs_batch = sampler.sample(shots=batch_size, separate_observables=True)
-        if obs_batch.ndim == 2 and obs_batch.shape[1] == 1:
-            obs_batch = obs_batch.flatten()
+        obs_batch = _flatten_single_observable(obs_batch)
 
         t0 = time.perf_counter()
         _, predicted = decode_fn(dem, dets_batch, obs_batch)

@@ -6,145 +6,78 @@ Standalone script with two entry points:
 2. run_decode_from_files: Load correlation analysis from files and run decode experiment
 """
 
-import ast
 import json
 import os
-import time
+
 import stim
-from function import generate_test_circuit, cal_multi_body_correlations, targets_to_dets
-from compare_ler_correlation_vs_ideal import (
+
+from inference_with_correlation_analysis import cal_multi_body_correlations
+from decoding import (
     create_dem_from_analysis,
     decode_with_belief_matching,
     decode_with_bposd,
     sample_dets_and_observables,
     sample_until_logical_errors,
 )
+from utils import (
+    _build_decomposed_targets,
+    _ca_from_json_serializable,
+    _ca_to_json_serializable,
+    _ensure_cpu_native,
+    _fmt_row,
+    _format_inference_eps,
+    _is_cuda_device,
+    _measure_cpu_gpu_time,
+    _sort_hyperedge_key,
+    extract_hyperedge_from_dem,
+    get_output_dir,
+)
 
 
-def extract_hyperedge_from_dem(dem: stim.DetectorErrorModel) -> tuple:
-    """Parse hyperedges and their probabilities from DEM.
+def generate_test_circuit(distance=4, rounds=2, shots=500000,
+                         code_task='surface_code:rotated_memory_x',
+                         after_clifford_depolarization=0.001,
+                         before_round_data_depolarization=0.001,
+                         before_measure_flip_probability=0.001,
+                         after_reset_flip_probability=0.001):
+    """
+    Generate test circuit and detection events.
 
     Args:
-        dem: Detector error model
+        distance: Code distance
+        rounds: Number of rounds
+        shots: Number of samples
+        code_task: Code type, e.g.:
+            - 'surface_code:rotated_memory_x'
+            - 'surface_code:rotated_memory_z'
+            - 'repetition_code:memory'
+            - 'color_code:memory'
+            Default: 'surface_code:rotated_memory_x'
+        Other args: Noise parameters
 
     Returns:
-        (hyperedge_probs, hyperedges): hyperedge->prob dict, and hyperedge list
+        circuit: stim circuit object
+        dem: Detector error model
+        dets: Detection event array
+        num_dets: Number of detectors
     """
-    hyperedges = []
-    hyperedge_probs = {}
+    circuit = stim.Circuit.generated(
+        code_task=code_task,
+        distance=distance,
+        rounds=rounds,
+        after_clifford_depolarization=after_clifford_depolarization,
+        before_round_data_depolarization=before_round_data_depolarization,
+        before_measure_flip_probability=before_measure_flip_probability,
+        after_reset_flip_probability=after_reset_flip_probability,
+    )
 
-    for instruction in dem.flattened():
-        if isinstance(instruction, stim.DemInstruction) and instruction.type == "error":
-            dets = targets_to_dets(instruction.targets_copy())
-            prob = instruction.args_copy()[0]
-            if dets not in hyperedge_probs:
-                hyperedges.append(dets)
-                hyperedge_probs[dets] = prob
-            else:
-                prob_prev = hyperedge_probs[dets]
-                hyperedge_probs[dets] = prob_prev * (1 - prob) + prob * (1 - prob_prev)
+    # decompose_errors=True decomposes hyperedge errors into at most 2-detector edges, required by BeliefMatching etc.
+    dem = circuit.detector_error_model()
+    num_dets = dem.num_detectors
+    dets = circuit.compile_detector_sampler().sample(shots=shots)
 
-    return hyperedge_probs, hyperedges
+    return circuit, dem, dets, num_dets
 
-
-def _format_inference_eps(eps):
-    """Format inference_eps as a directory-safe string."""
-    if isinstance(eps, (list, tuple)):
-        return "_".join(str(e) for e in eps)
-    return str(eps)
-
-
-def get_output_dir(code_task, distance, rounds, shots_analysis, inference_eps, base_dir="data"):
-    """Get output directory path: data/{code_task}_d{d}r{r}/{shots_analysis}_{inference_eps}/"""
-    code_task_safe = code_task.replace(":", "_")
-    eps_str = _format_inference_eps(inference_eps)
-    return os.path.join(base_dir, f"{code_task_safe}_d{distance}r{rounds}", f"{shots_analysis}_{eps_str}")
-
-def get_ca_base_dir(code_task, distance, rounds, base_dir="data"):
-    """Get correlation root directory for a code, for decoding multiple groups in one pass."""
-    code_task_safe = code_task.replace(":", "_")
-    return os.path.join(base_dir, f"{code_task_safe}_d{distance}r{rounds}")
-
-def _to_json_scalar(x):
-    """Convert Tensor/numpy scalar to Python native type."""
-    if hasattr(x, "item"):
-        return float(x.item())
-    return float(x)
-
-def _ca_to_json_serializable(ca_results):
-    """Convert ca_results to JSON-serializable format (frozenset -> tuple, Tensor -> float)."""
-    def conv_key(k):
-        return tuple(sorted(k)) if isinstance(k, (frozenset, set)) else k
-
-    out = {"params": ca_results["params"]}
-    out["ideal_probs"] = {str(conv_key(k)): _to_json_scalar(v) for k, v in ca_results["ideal_probs"].items()}
-    out["given_probs_list"] = [
-        {str(conv_key(k)): _to_json_scalar(v) for k, v in d.items()} for d in ca_results["given_probs_list"]
-    ]
-    out["infer_probs_list"] = [
-        {str(conv_key(k)): _to_json_scalar(v) for k, v in d.items()} for d in ca_results["infer_probs_list"]
-    ]
-    out["ideal_set"] = [tuple(sorted(h)) for h in ca_results["ideal_set"]]
-    out["extra_edges"] = [[tuple(sorted(h)) for h in s] for s in ca_results["extra_edges"]]
-    out["has_extra"] = ca_results["has_extra"]
-    out["all_rows"] = [
-        [(tag, tuple(sorted(h)), row) for tag, h, row in rows]
-        for rows in ca_results["all_rows"]
-    ]
-    return out
-
-def _ca_from_json_serializable(data):
-    """Restore ca_results from JSON format (tuple -> frozenset)."""
-    def to_frozenset(x):
-        return frozenset(x) if isinstance(x, (list, tuple)) else x
-
-    out = {"params": data["params"]}
-    def _parse_key(k):
-        return frozenset(ast.literal_eval(k))
-
-    out["ideal_probs"] = {_parse_key(k): v for k, v in data["ideal_probs"].items()}
-    out["given_probs_list"] = [
-        {_parse_key(k): v for k, v in d.items()} for d in data["given_probs_list"]
-    ]
-    out["infer_probs_list"] = [
-        {_parse_key(k): v for k, v in d.items()} for d in data["infer_probs_list"]
-    ]
-    out["ideal_set"] = {frozenset(h) for h in data["ideal_set"]}
-    out["extra_edges"] = [{frozenset(h) for h in s} for s in data["extra_edges"]]
-    out["has_extra"] = data["has_extra"]
-    out["all_rows"] = [
-        [(tag, frozenset(h), row) for tag, h, row in rows]
-        for rows in data["all_rows"]
-    ]
-    return out
-
-def _fmt_row(h_str, p_id_s, p_gv_s, gv_e, p_if_s, if_e):
-    """Format per-hyperedge table row."""
-    return f"{h_str:<20} {p_id_s:>12} {p_gv_s:>12} {gv_e:>10} {p_if_s:>12} {if_e:>10}"
-
-def _build_decomposed_targets(dets_frozenset):
-    """Decompose hyperedge into graphlike (<=2 detector) components for belief_matching decode.
-
-    Matches circuit.detector_error_model(decompose_errors=True) format:
-    - <=2 body: return detector targets directly, no decomposition
-    - 3+ body: split into disjoint <=2 body components, joined by ^ (separator)
-      e.g. {D0,D1,D2} -> D0 D1 ^ D2
-           {D0,D1,D2,D3} -> D0 D1 ^ D2 D3
-    """
-    sorted_dets = sorted(dets_frozenset)
-    n = len(sorted_dets)
-
-    if n <= 2:
-        return [stim.target_relative_detector_id(d) for d in sorted_dets]
-
-    targets = []
-    for j in range(0, n, 2):
-        if j > 0:
-            targets.append(stim.target_separator())
-        targets.append(stim.target_relative_detector_id(sorted_dets[j]))
-        if j + 1 < n:
-            targets.append(stim.target_relative_detector_id(sorted_dets[j + 1]))
-    return targets
 
 def run_correlation_analysis(
     distance=5,
@@ -157,6 +90,7 @@ def run_correlation_analysis(
     device="cpu",
     CA_mode=("given", "inference"),
     base_dir="data",
+    batch_shots=100000,
 ):
     """Run correlation analysis, output to data/{code_task}_d{d}r{r}/{shots_analysis}_{inference_eps}/.
 
@@ -170,7 +104,7 @@ def run_correlation_analysis(
         max_order, inference_eps: Correlation analysis params
         CA_mode: ['given','inference']
         base_dir: Output root dir, default "data"
-
+        batch_shots: Shots per batch for correlation analysis
     Returns:
         tuple: (ca_results dict, ca_json_paths list, ca_txt_paths list)
     """
@@ -196,106 +130,123 @@ def run_correlation_analysis(
 
     dets_analysis, _ = sample_dets_and_observables(circuit, shots_analysis, seed=42)
 
+    ideal_set = set(ideal_probs.keys())
+    n_shots = len(shots_analysis_list)
+    empty_list = [0.0] * n_shots
+
     given_probs_list = []
-    given_time_list = []
+    given_cpu_time_list = []
+    given_gpu_time_list = []
     if "given" in CA_mode:
         given_max_order = max(len(h) for h in hyperedges) if hyperedges else 1
         hyperedge_list = [set() for _ in range(given_max_order)]
         for h in hyperedges:
             hyperedge_list[len(h) - 1].add(h)
         for sa in shots_analysis_list:
-            t0 = time.time()
-            p_given, _ = cal_multi_body_correlations(
-                dets_analysis[:sa],
-                mode="given_dem",
-                hyperedge_list=hyperedge_list,
-                correct_in_step=False,
-                device=device,
+            (p_given, _), cpu_t, gpu_t = _measure_cpu_gpu_time(
+                device,
+                lambda s=sa: cal_multi_body_correlations(
+                    dets_analysis[:s],
+                    mode="given_dem_topology",
+                    hyperedge_list=hyperedge_list,
+                    correct_in_step=False,
+                    device=device,
+                    batch_shots=batch_shots,
+                ),
             )
             given_probs = {k: v for d in p_given for k, v in d.items()}
-            dt = time.time() - t0
-            given_time_list.append(dt)
-            print(f"given_dem correlation analysis: {len(given_probs)} hyperedges, time {dt:.6f}s")
+            given_cpu_time_list.append(cpu_t)
+            given_gpu_time_list.append(gpu_t)
+            print(f"given_dem_topology correlation analysis: {len(given_probs)} hyperedges, CPU {cpu_t:.6f}s, GPU {gpu_t:.6f}s")
             given_probs_list.append(given_probs)
     else:
-        given_probs_list = [{} for _ in shots_analysis_list]
-        given_time_list = [0.0] * len(shots_analysis_list)
+        given_probs_list = [{} for _ in range(n_shots)]
+        given_cpu_time_list = list(empty_list)
+        given_gpu_time_list = list(empty_list)
 
     infer_probs_list = []
-    infer_time_list = []
-    ideal_set = set(ideal_probs.keys())
+    infer_cpu_time_list = []
+    infer_gpu_time_list = []
     extra_edges = []
     has_extra = []
     if "inference" in CA_mode:
         for sa in shots_analysis_list:
-            t0 = time.time()
-            p_infer, _ = cal_multi_body_correlations(
-                dets_analysis[:sa],
-                mode="inference",
-                max_order=max_order,
-                device=device,
-                eps=inference_eps,
+            (p_infer, _), cpu_t, gpu_t = _measure_cpu_gpu_time(
+                device,
+                lambda s=sa: cal_multi_body_correlations(
+                    dets_analysis[:s],
+                    mode="inference",
+                    max_order=max_order,
+                    device=device,
+                    eps=inference_eps,
+                    batch_shots=batch_shots,
+                ),
             )
             infer_probs = {k: v for d in p_infer for k, v in d.items()}
-            dt = time.time() - t0
-            infer_time_list.append(dt)
-            print(f"inference correlation analysis: {len(infer_probs)} hyperedges, time {dt:.6f}s")
+            infer_cpu_time_list.append(cpu_t)
+            infer_gpu_time_list.append(gpu_t)
+            print(f"inference correlation analysis: {len(infer_probs)} hyperedges, CPU {cpu_t:.6f}s, GPU {gpu_t:.6f}s")
             infer_probs_list.append(infer_probs)
-        for i in range(len(shots_analysis_list)):
-            infer_set = set(infer_probs_list[i].keys())
-            extra_edges.append(infer_set - ideal_set)
-            has_extra.append(len(extra_edges[i]) > 0)
+        for i, infer_probs in enumerate(infer_probs_list):
+            infer_set = set(infer_probs.keys())
+            extra = infer_set - ideal_set
+            extra_edges.append(extra)
+            has_extra.append(len(extra) > 0)
             print(
                 f"\nIdeal hyperedges: {len(ideal_set)}, Inference hyperedges: {len(infer_set)}, "
-                f"Inference extra edges: {len(extra_edges[i])}"
+                f"Inference extra edges: {len(extra)}"
             )
     else:
-        infer_probs_list = [{} for _ in shots_analysis_list]
-        infer_time_list = [0.0] * len(shots_analysis_list)
-        extra_edges = [set() for _ in shots_analysis_list]
-        has_extra = [False] * len(shots_analysis_list)
+        infer_probs_list = [{} for _ in range(n_shots)]
+        infer_cpu_time_list = list(empty_list)
+        infer_gpu_time_list = list(empty_list)
+        extra_edges = [set() for _ in range(n_shots)]
+        has_extra = [False] * n_shots
 
     all_rows = []
-    for i in range(len(shots_analysis_list)):
-        print(f"Correlation analysis with {shots_analysis_list[i]} shots")
+    for i, sa in enumerate(shots_analysis_list):
+        print(f"Correlation analysis with {sa} shots")
         header = _fmt_row("Hyperedge", "ideal p", "given", "given err%", "infer p", "infer err%")
         sep = "-" * 90
         print("\n" + "=" * 90)
         print(header)
         print(sep)
-        all_rows.append([])
-        for h in sorted(ideal_set, key=lambda x: (len(x), sorted(x))):
+        rows_i = []
+        for h in sorted(ideal_set, key=_sort_hyperedge_key):
             p_id = ideal_probs[h]
-            p_gv = given_probs_list[i].get(h, None) if "given" in CA_mode else None
-            p_if = infer_probs_list[i].get(h, None) if "inference" in CA_mode else None
+            p_gv = given_probs_list[i].get(h) if "given" in CA_mode else None
+            p_if = infer_probs_list[i].get(h) if "inference" in CA_mode else None
+            p_id_f = float(p_id)
             gv_e = (
-                f"{abs(float(p_gv) - float(p_id)) / float(p_id) * 100:.2f}"
-                if (p_gv is not None and abs(float(p_id)) > 1e-10)
+                f"{abs(float(p_gv) - p_id_f) / p_id_f * 100:.2f}"
+                if (p_gv is not None and abs(p_id_f) > 1e-10)
                 else "-"
             )
             if_e = (
-                f"{abs(float(p_if) - float(p_id)) / float(p_id) * 100:.2f}"
-                if (p_if is not None and abs(float(p_id)) > 1e-10)
+                f"{abs(float(p_if) - p_id_f) / p_id_f * 100:.2f}"
+                if (p_if is not None and abs(p_id_f) > 1e-10)
                 else "-"
             )
             p_gv_s = f"{float(p_gv):.8f}" if p_gv is not None else "     -      "
             p_if_s = f"{float(p_if):.8f}" if p_if is not None else "     -      "
-            row = _fmt_row(str(tuple(sorted(h))), f"{float(p_id):.8f}", p_gv_s, gv_e, p_if_s, if_e)
+            row = _fmt_row(str(tuple(sorted(h))), f"{p_id_f:.8f}", p_gv_s, gv_e, p_if_s, if_e)
             print(row)
-            all_rows[i].append(("ideal", h, row))
+            rows_i.append(("ideal", h, row))
         if "inference" in CA_mode and has_extra[i]:
             print(sep)
             print(f">>> Inference extra hyperedges ({len(extra_edges[i])}, not in ideal/given):")
             print(sep)
-            for h in sorted(extra_edges[i], key=lambda x: (len(x), sorted(x))):
+            for h in sorted(extra_edges[i], key=_sort_hyperedge_key):
                 p_if = infer_probs_list[i][h]
                 row = _fmt_row(
                     str(tuple(sorted(h))), "     -      ", "     -      ", "-",
                     f"{float(p_if):.8f}", "-"
                 )
                 print(row)
-                all_rows[i].append(("extra", h, row))
+                rows_i.append(("extra", h, row))
+        all_rows.append(rows_i)
 
+    # Ensure all results are on CPU / Python native to avoid holding GPU memory in notebook
     ca_results = {
         "params": {
             "distance": distance,
@@ -305,20 +256,28 @@ def run_correlation_analysis(
             "max_order": max_order,
             "inference_eps": inference_eps,
             "shots_analysis_list": shots_analysis_list,
+            "batch_shots": batch_shots,
         },
-        "ideal_probs": ideal_probs,
-        "given_probs_list": given_probs_list,
-        "infer_probs_list": infer_probs_list,
+        "ideal_probs": _ensure_cpu_native(ideal_probs),
+        "given_probs_list": _ensure_cpu_native(given_probs_list),
+        "infer_probs_list": _ensure_cpu_native(infer_probs_list),
         "ideal_set": ideal_set,
         "extra_edges": extra_edges,
         "has_extra": has_extra,
         "all_rows": all_rows,
+        "given_cpu_time_list": given_cpu_time_list,
+        "given_gpu_time_list": given_gpu_time_list,
+        "infer_cpu_time_list": infer_cpu_time_list,
+        "infer_gpu_time_list": infer_gpu_time_list,
     }
+    if _is_cuda_device(device):
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     ca_json_paths = []
     ca_txt_paths = []
-    for i in range(len(shots_analysis_list)):
-        sa = shots_analysis_list[i]
+    for i, sa in enumerate(shots_analysis_list):
         out_dir = get_output_dir(code_task, distance, rounds, sa, inference_eps, base_dir)
         os.makedirs(out_dir, exist_ok=True)
 
@@ -334,6 +293,10 @@ def run_correlation_analysis(
             "extra_edges": [extra_edges[i]],
             "has_extra": [has_extra[i]],
             "all_rows": [all_rows[i]],
+            "given_cpu_time_list": [given_cpu_time_list[i]],
+            "given_gpu_time_list": [given_gpu_time_list[i]],
+            "infer_cpu_time_list": [infer_cpu_time_list[i]],
+            "infer_gpu_time_list": [infer_gpu_time_list[i]],
         }
 
         ca_json_path = os.path.join(out_dir, "correlation.json")
@@ -343,14 +306,19 @@ def run_correlation_analysis(
             json.dump(_ca_to_json_serializable(ca_results_i), f, indent=2, ensure_ascii=False)
         print(f"Correlation analysis saved: {ca_json_path}")
 
-        run_time = given_time_list[i] + infer_time_list[i]
+        given_cpu = given_cpu_time_list[i]
+        given_gpu = given_gpu_time_list[i]
+        infer_cpu = infer_cpu_time_list[i]
+        infer_gpu = infer_gpu_time_list[i]
         with open(ca_txt_path, "w", encoding="utf-8") as f:
             f.write("=" * 90 + "\n")
             f.write("Correlation Analysis: Ideal vs Given vs Inference\n")
             f.write("=" * 90 + "\n\n")
             f.write(f"Code task: {code_task}, d={distance}, r={rounds}, p={p_circuit}\n")
             f.write(f"shots_analysis={sa}, max_order={max_order}\n")
-            f.write(f"Run time: {run_time:.2f}s\n")
+            f.write(f"Correlation analysis timing:\n")
+            f.write(f"  Given DEM:   CPU core time: {given_cpu:.4f}s, GPU runtime: {given_gpu:.4f}s\n")
+            f.write(f"  Inference:   CPU core time: {infer_cpu:.4f}s, GPU runtime: {infer_gpu:.4f}s\n")
             f.write(f"Ideal hyperedges: {len(ideal_set)}\n\n")
             f.write(f"correlation analysis with {sa} shots\n")
             f.write("\n" + "=" * 90 + "\n")
@@ -366,6 +334,7 @@ def run_correlation_analysis(
         ca_txt_paths.append(ca_txt_path)
 
     return ca_results, ca_json_paths, ca_txt_paths
+
 
 def collect_ca_from_base_dir(
     ca_base_dir: str,
@@ -418,10 +387,8 @@ def collect_ca_from_base_dir(
         raise FileNotFoundError(f"No matching correlation.json under {ca_base_dir} {filter_msg}")
 
     def _sort_key(item):
-        subname = item[0]
-        parts = subname.split("_")
         try:
-            return int(parts[0])
+            return int(item[0].split("_", 1)[0])
         except (ValueError, IndexError):
             return 0
 
@@ -444,8 +411,13 @@ def collect_ca_from_base_dir(
         "extra_edges": [r["extra_edges"][0] for r in results],
         "has_extra": [r["has_extra"][0] for r in results],
         "all_rows": [r["all_rows"][0] for r in results],
+        "given_cpu_time_list": [r.get("given_cpu_time_list", [0.0])[0] for r in results],
+        "given_gpu_time_list": [r.get("given_gpu_time_list", [0.0])[0] for r in results],
+        "infer_cpu_time_list": [r.get("infer_cpu_time_list", [0.0])[0] for r in results],
+        "infer_gpu_time_list": [r.get("infer_gpu_time_list", [0.0])[0] for r in results],
     }
     return merged
+
 
 def load_correlation_analysis(ca_path: str) -> dict:
     """Load correlation analysis from .json file.
@@ -463,6 +435,7 @@ def load_correlation_analysis(ca_path: str) -> dict:
     with open(ca_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return _ca_from_json_serializable(data)
+
 
 def run_decode_from_files(
     ca_path,
@@ -550,6 +523,7 @@ def run_decode(
         raise ValueError("Must provide ca_results or ca_path")
     if ca_results is None:
         ca_results = load_correlation_analysis(ca_path)
+    _ = output_dir  # kept for compatibility
 
     # Support merged multi-group data from ca_base_dir (incl. inference_eps_list)
     if "inference_eps_list" in ca_results["params"]:
@@ -563,25 +537,25 @@ def run_decode(
     p_circuit = params["p_circuit"]
     code_task = params["code_task"]
     dec = decoder or params.get("decoder", "belief_matching")
-    _modes = []
-    if any(given_probs_list):
-        _modes.append("given")
-    if any(infer_probs_list):
-        _modes.append("inference")
-    CA_mode = tuple(_modes) if _modes else params.get("CA_mode", ("given", "inference"))
     shots_analysis_list = params["shots_analysis_list"]
-    ideal_probs = ca_results["ideal_probs"]
     given_probs_list = ca_results["given_probs_list"]
     infer_probs_list = ca_results["infer_probs_list"]
     ideal_set = ca_results["ideal_set"]
     extra_edges = ca_results["extra_edges"]
     has_extra = ca_results["has_extra"]
 
+    _modes = []
+    if any(given_probs_list):
+        _modes.append("given")
+    if any(infer_probs_list):
+        _modes.append("inference")
+    CA_mode = tuple(_modes) if _modes else params.get("CA_mode", ("given", "inference"))
+
     if dec not in ("belief_matching", "bposd"):
         raise ValueError(f"decoder must be 'belief_matching' or 'bposd', got {dec!r}")
     decode_fn = decode_with_belief_matching if dec == "belief_matching" else decode_with_bposd
 
-    circuit, _, _, num_dets = generate_test_circuit(
+    circuit, _, _, _ = generate_test_circuit(
         distance=distance,
         rounds=rounds,
         shots=batch_size,
@@ -610,8 +584,7 @@ def run_decode(
     print(f"  Ideal DEM LER:                {ler_ideal:.6f}")
 
     ler_paths = []
-    for i in range(len(shots_analysis_list)):
-        sa = shots_analysis_list[i]
+    for i, sa in enumerate(shots_analysis_list):
         eps = inference_eps_list[i] if inference_eps_list is not None else params.get("inference_eps", 0)
         out_dir = get_output_dir(code_task, distance, rounds, sa, eps, base_dir)
         os.makedirs(out_dir, exist_ok=True)
@@ -620,34 +593,22 @@ def run_decode(
 
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write("=" * 90 + "\n")
-            f.write("LER Comparison: Ideal vs Given DEM vs Inference DEM\n")
+            f.write("LER Comparison: Ideal DEM vs Given DEM Topology vs Infer DEM\n")
             f.write("=" * 90 + "\n\n")
             f.write(f"Code task: {code_task}, d={distance}, r={rounds}, p={p_circuit}\n")
             f.write(f"shots_analysis={sa}, target_logical_errors={target_logical_errors}, total_shots={total_shots}, max_order={params['max_order']}, decoder={dec}\n")
             f.write(f"Ideal hyperedges: {len(ideal_set)}\n")
             f.write(f"Ideal DEM LER:                {ler_ideal:.6f}\n")
         if "given" in CA_mode:
-            given_dem = create_dem_from_analysis(ideal_dem, given_probs_list[i])
-            ler_given, _ = decode_fn(given_dem, dets_decode, obs_decode)
+            given_dem_topology = create_dem_from_analysis(ideal_dem, given_probs_list[i])
+            ler_given_dem_topology, _ = decode_fn(given_dem_topology, dets_decode, obs_decode)
         else:
-            ler_given = None
+            ler_given_dem_topology = None
         if "inference" in CA_mode:
             infer_set = set(infer_probs_list[i].keys())
-            infer_shared = {h: infer_probs_list[i][h] for h in infer_set & ideal_set}
-            infer_dem_shared = create_dem_from_analysis(ideal_dem, infer_shared)
-            ler_infer_shared, _ = decode_fn(infer_dem_shared, dets_decode, obs_decode)
-        else:
-            ler_infer_shared = None
-
-        if "given" in CA_mode:
-            print(f"  Given DEM LER from {shots_analysis_list[i]} shots:                {ler_given:.6f}  (gap: {ler_ideal - ler_given:+.6f})")
-        if "inference" in CA_mode:
-            print(f"  Inference DEM LER (shared edges) from {shots_analysis_list[i]} shots:   {ler_infer_shared:.6f}  (gap: {ler_ideal - ler_infer_shared:+.6f})")
-
-        if "inference" in CA_mode and has_extra[i]:
-            extra_dem = stim.DetectorErrorModel()
+            infer_dem_base = stim.DetectorErrorModel()
             for instr in ideal_dem.flattened():
-                extra_dem.append(instr)
+                infer_dem_base.append(instr)
             for h in extra_edges[i]:
                 p_val = float(infer_probs_list[i][h])
                 if p_val <= 0 or p_val >= 1:
@@ -657,27 +618,35 @@ def run_decode(
                     if dec == "bposd"
                     else _build_decomposed_targets(h)
                 )
-                extra_dem.append(stim.DemInstruction("error", args=[p_val], targets=targets))
-            infer_dem_full = create_dem_from_analysis(extra_dem, infer_probs_list[i])
-            ler_infer_full, _ = decode_fn(infer_dem_full, dets_decode, obs_decode)
-            print(f"  Inference DEM LER (with extra edges) from {shots_analysis_list[i]} shots: {ler_infer_full:.6f}  (gap: {ler_ideal - ler_infer_full:+.6f})")
+                infer_dem_base.append(stim.DemInstruction("error", args=[p_val], targets=targets))
+            infer_dem = create_dem_from_analysis(infer_dem_base, infer_probs_list[i])
+            ler_infer_dem, _ = decode_fn(infer_dem, dets_decode, obs_decode)
         else:
-            ler_infer_full = ler_infer_shared if "inference" in CA_mode else None
-            if "inference" in CA_mode:
-                print("  (Inference hyperedges match ideal, no extra edges)")
+            ler_infer_dem = None
+
+        if "given" in CA_mode:
+            print(
+                f"  Given DEM Topology LER from {sa} shots:       "
+                f"{ler_given_dem_topology:.6f}  (gap: {ler_ideal - ler_given_dem_topology:+.6f})"
+            )
+        if "inference" in CA_mode:
+            print(
+                f"  Infer DEM LER from {sa} shots:                "
+                f"{ler_infer_dem:.6f}  (gap: {ler_ideal - ler_infer_dem:+.6f})"
+            )
 
         with open(txt_path, "a", encoding="utf-8") as f:
-            f.write(f"\ncorrelation analysis with {shots_analysis_list[i]} shots\n")
-            f.write(f"Given DEM LER:                {ler_given:.6f}  (gap: {ler_ideal - ler_given:+.6f})\n" if ler_given is not None else "Given DEM LER:                -      \n")
+            f.write(f"\ncorrelation analysis with {sa} shots\n")
+            f.write(
+                f"Given DEM Topology LER:       {ler_given_dem_topology:.6f}  (gap: {ler_ideal - ler_given_dem_topology:+.6f})\n"
+                if ler_given_dem_topology is not None
+                else "Given DEM Topology LER:       -      \n"
+            )
             if "inference" in CA_mode:
-                f.write(f"Inference hyperedges: {len(infer_set)}, extra edges: {len(extra_edges[i])}\n")
-                f.write(f"Inference DEM LER (shared edges):   {ler_infer_shared:.6f}  (gap: {ler_ideal - ler_infer_shared:+.6f})\n")
-                if has_extra[i]:
-                    f.write(f"Inference DEM LER (with extra edges): {ler_infer_full:.6f}  (gap: {ler_ideal - ler_infer_full:+.6f})\n")
-                else:
-                    f.write("(Inference hyperedges match ideal, no extra edges)\n")
+                f.write(f"Infer hyperedges: {len(infer_set)}, extra edges: {len(extra_edges[i])}\n")
+                f.write(f"Infer DEM LER:                {ler_infer_dem:.6f}  (gap: {ler_ideal - ler_infer_dem:+.6f})\n")
             else:
-                f.write("Inference hyperedges: -, extra edges: -      \n")
+                f.write("Infer hyperedges: -, extra edges: -      \n")
 
     return ler_paths
 
