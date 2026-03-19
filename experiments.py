@@ -114,7 +114,7 @@ def run_correlation_analysis(
     shots_analysis = max(shots_analysis_list)
     use_decompose = True  # Correlation analysis uses graphlike format
 
-    circuit, _, _, num_dets = generate_test_circuit(
+    circuit, _, _, _ = generate_test_circuit(
         distance=distance,
         rounds=rounds,
         shots=shots_analysis,
@@ -126,7 +126,7 @@ def run_correlation_analysis(
     )
     ideal_dem = circuit.detector_error_model(decompose_errors=use_decompose)
     ideal_probs, hyperedges = extract_hyperedge_from_dem(ideal_dem)
-    print(f"Num detectors: {num_dets}, num hyperedges: {len(ideal_probs)}")
+    print("Circuit generated; starting correlation analysis.")
 
     dets_analysis, _ = sample_dets_and_observables(circuit, shots_analysis, seed=42)
 
@@ -157,7 +157,7 @@ def run_correlation_analysis(
             given_probs = {k: v for d in p_given for k, v in d.items()}
             given_cpu_time_list.append(cpu_t)
             given_gpu_time_list.append(gpu_t)
-            print(f"given_dem_topology correlation analysis: {len(given_probs)} hyperedges, CPU {cpu_t:.6f}s, GPU {gpu_t:.6f}s")
+            print("given_dem_topology correlation analysis completed.")
             given_probs_list.append(given_probs)
     else:
         given_probs_list = [{} for _ in range(n_shots)]
@@ -185,17 +185,14 @@ def run_correlation_analysis(
             infer_probs = {k: v for d in p_infer for k, v in d.items()}
             infer_cpu_time_list.append(cpu_t)
             infer_gpu_time_list.append(gpu_t)
-            print(f"inference correlation analysis: {len(infer_probs)} hyperedges, CPU {cpu_t:.6f}s, GPU {gpu_t:.6f}s")
+            print("inference correlation analysis completed.")
             infer_probs_list.append(infer_probs)
         for i, infer_probs in enumerate(infer_probs_list):
             infer_set = set(infer_probs.keys())
             extra = infer_set - ideal_set
             extra_edges.append(extra)
             has_extra.append(len(extra) > 0)
-            print(
-                f"\nIdeal hyperedges: {len(ideal_set)}, Inference hyperedges: {len(infer_set)}, "
-                f"Inference extra edges: {len(extra)}"
-            )
+            print("Inference-vs-ideal hyperedge comparison completed.")
     else:
         infer_probs_list = [{} for _ in range(n_shots)]
         infer_cpu_time_list = list(empty_list)
@@ -205,12 +202,7 @@ def run_correlation_analysis(
 
     all_rows = []
     for i, sa in enumerate(shots_analysis_list):
-        print(f"Correlation analysis with {sa} shots")
-        header = _fmt_row("Hyperedge", "ideal p", "given", "given err%", "infer p", "infer err%")
-        sep = "-" * 90
-        print("\n" + "=" * 90)
-        print(header)
-        print(sep)
+        print(f"Correlation analysis finished for shots={sa}.")
         rows_i = []
         for h in sorted(ideal_set, key=_sort_hyperedge_key):
             p_id = ideal_probs[h]
@@ -230,19 +222,14 @@ def run_correlation_analysis(
             p_gv_s = f"{float(p_gv):.8f}" if p_gv is not None else "     -      "
             p_if_s = f"{float(p_if):.8f}" if p_if is not None else "     -      "
             row = _fmt_row(str(tuple(sorted(h))), f"{p_id_f:.8f}", p_gv_s, gv_e, p_if_s, if_e)
-            print(row)
             rows_i.append(("ideal", h, row))
         if "inference" in CA_mode and has_extra[i]:
-            print(sep)
-            print(f">>> Inference extra hyperedges ({len(extra_edges[i])}, not in ideal/given):")
-            print(sep)
             for h in sorted(extra_edges[i], key=_sort_hyperedge_key):
                 p_if = infer_probs_list[i][h]
                 row = _fmt_row(
                     str(tuple(sorted(h))), "     -      ", "     -      ", "-",
                     f"{float(p_if):.8f}", "-"
                 )
-                print(row)
                 rows_i.append(("extra", h, row))
         all_rows.append(rows_i)
 
@@ -304,7 +291,7 @@ def run_correlation_analysis(
 
         with open(ca_json_path, "w", encoding="utf-8") as f:
             json.dump(_ca_to_json_serializable(ca_results_i), f, indent=2, ensure_ascii=False)
-        print(f"Correlation analysis saved: {ca_json_path}")
+        print("Correlation analysis json saved.")
 
         given_cpu = given_cpu_time_list[i]
         given_gpu = given_gpu_time_list[i]
@@ -328,7 +315,7 @@ def run_correlation_analysis(
             f.write("-" * 90 + "\n")
             for _tag, _h, row in all_rows[i]:
                 f.write(row + "\n")
-        print(f"Correlation table saved: {ca_txt_path}")
+        print("Correlation analysis table saved.")
 
         ca_json_paths.append(ca_json_path)
         ca_txt_paths.append(ca_txt_path)
@@ -568,7 +555,7 @@ def run_decode(
     use_decompose = dec == "belief_matching"
     ideal_dem = circuit.detector_error_model(decompose_errors=use_decompose)
 
-    print(f"\nUsing decoder: {dec}, sampling until {target_logical_errors} logical errors collected...")
+    print("Starting decoding experiment.")
     dets_decode, obs_decode, total_shots, total_logical_errors, _, _ = sample_until_logical_errors(
         circuit, ideal_dem, decode_fn,
         target_logical_errors=target_logical_errors,
@@ -577,11 +564,7 @@ def run_decode(
         max_shots=max_shots,
     )
     ler_ideal = total_logical_errors / total_shots
-    print(f"  Actual sampled: {total_shots} shots, logical errors: {total_logical_errors}")
-    print("\n" + "=" * 70)
-    print("LER comparison (held-out decode sample)")
-    print("=" * 70)
-    print(f"  Ideal DEM LER:                {ler_ideal:.6f}")
+    print("Sampling and decoding baseline completed.")
 
     ler_paths = []
     for i, sa in enumerate(shots_analysis_list):
@@ -624,16 +607,8 @@ def run_decode(
         else:
             ler_infer_dem = None
 
-        if "given" in CA_mode:
-            print(
-                f"  Given DEM Topology LER from {sa} shots:       "
-                f"{ler_given_dem_topology:.6f}  (gap: {ler_ideal - ler_given_dem_topology:+.6f})"
-            )
-        if "inference" in CA_mode:
-            print(
-                f"  Infer DEM LER from {sa} shots:                "
-                f"{ler_infer_dem:.6f}  (gap: {ler_ideal - ler_infer_dem:+.6f})"
-            )
+        if "given" in CA_mode or "inference" in CA_mode:
+            print(f"Decoding comparison completed for shots={sa}.")
 
         with open(txt_path, "a", encoding="utf-8") as f:
             f.write(f"\ncorrelation analysis with {sa} shots\n")
@@ -676,9 +651,7 @@ if __name__ == "__main__":
             decoder=args.decoder,
             base_dir=args.base_dir,
         )
-        print(f"\nLER output:")
-        for p in ler_paths:
-            print(f"  {p}")
+        print("LER outputs generated.")
     else:
         ca_results, ca_json_paths, ca_txt_paths = run_correlation_analysis(
             distance=args.distance,
@@ -691,6 +664,4 @@ if __name__ == "__main__":
             device="cpu",
             base_dir=args.base_dir,
         )
-        print(f"\nCorrelation analysis output:")
-        for p in ca_json_paths:
-            print(f"  {p}")
+        print("Correlation analysis outputs generated.")
